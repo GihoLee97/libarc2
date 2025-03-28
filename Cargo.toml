@@ -24,6 +24,7 @@ spin_sleep = "1.2"
 
 [target.'cfg(all(any(target_os = "windows", target_os = "linux"), target_arch = "x86_64"))'.dependencies]
 beastlink = { git = "https://github.com/arc-instruments/beastlink-rs", version = "1.0" }
+#beastlink = { path = "../beastlink", develop = true }
 
 [dev-dependencies]
 serial_test = "0.4"

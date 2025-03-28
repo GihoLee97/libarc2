@@ -1698,6 +1698,98 @@ impl Instrument {
         Ok(res)
     }
 
+    /// MAC operation with given input and output channels and input voltages
+    ///
+    /// This function will perform multiply accumulation operation. Input channel list contains
+    /// input channels and corresponding input voltage. Then, the currents from output channels
+    /// will be collected.
+    pub fn mac(&mut self, inp_chans: &[(usize, f32)], out_chans: &[usize]) -> Result<Vec<f32>, ArC2Error> {
+
+        // let mut results = Vec::with_capacity(out_chans.len());
+        let mut res : Vec<f32>;
+        let mut chunk: Chunk;
+
+        // Reset DAC configuration
+        self.reset_dacs()?;
+
+        chunk = self._mac_inner(inp_chans, out_chans)?;
+
+        // Withdraw voltage from the biasing channels
+        self.ground_all_fast()?.execute()?;
+        self.wait();
+
+        res = self.read_chunk(&mut chunk, &DataMode::All, &ReadType::Current)?;
+
+        // For each channel in `out_chans`, get the corresponding value from `res`
+        let values = out_chans.iter().map(|&chan| res[chan]).collect();
+
+        Ok(values)
+    }
+
+    ///
+    ///
+    fn _mac_inner(&mut self, inp_chans: &[(usize, f32)], out_chans: &[usize]) -> Result<Chunk, ArC2Error> {
+
+        let zero: u16 = vidx!(0.0);
+
+        // generate a list of dac settings
+        let mut actives: Vec<(u16, u16, u16)> = Vec::new();
+        for (chan, v) in inp_chans {
+            actives.push((*chan as u16, vidx!(-v), vidx!(-v)));
+        }
+        for chan in out_chans {
+            actives.push((*chan as u16, zero, zero));
+        }
+        let (mut upch, setdacs) = SetDAC::from_channels(&actives,
+            Some((zero,zero)), &ChannelState::VoltArb, &ChannelState::VoltArb)?;
+        // prepare OpAmps as all of them will connected to VoltArb
+        let mut chans_to_prep = out_chans.to_vec();
+        for (chan, _) in inp_chans {
+            chans_to_prep.push(*chan);
+        }
+        self.amp_prep(Some(&chans_to_prep))?;
+        self.process(upch.compile())?;
+        //
+        for mut instr in setdacs {
+            self.process(instr.compile())?;
+        }
+        self.process(&*UPDATE_DAC)?;
+        self.add_delay(30_000u128)?;
+
+        // set all channels to Arbitrary Voltage
+        let mut channelconf = UpdateChannel::from_regs_global_state(ChannelState::VoltArb);
+        self.process(channelconf.compile())?;
+
+        // Prepare the ADC mask for the readout
+        let mut adcmask = ChanMask::new();
+
+        for chan in out_chans {
+            adcmask.set_enabled(*chan, true);
+        }
+
+        let chunk = self.make_chunk()?;
+
+        #[cfg(feature="zero_before_write")]
+        match self._zero_chunk(&chunk) {
+            Ok(()) => {},
+            Err(err) => { eprintln!("Zeroing chunk at {} failed: {}", chunk.addr(), err) }
+        };
+
+        let mut currentread = CurrentRead::new(&adcmask, chunk.addr(),
+            chunk.flag_addr(), VALUEAVAILFLAG);
+        self.process(currentread.compile())?;
+        self.add_delay(1_000u128)?;
+
+        // Similar to 'read_slice_open', need to force an amp prep
+        // on the C READ channels to avoid spikes during range
+        // transitions.
+        let mut amp_prep = AmpPrep::new(&adcmask);
+        self.process(amp_prep.compile())?;
+
+        Ok(chunk)
+    }
+
+
     /// Read all the available crosspoints at the specified voltage
     ///
     /// This function will read all available crosspoints on the array. This can be done
